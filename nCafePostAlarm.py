@@ -6,7 +6,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import NoSuchElementException # 에러 처리를 위해 추가
+from selenium.common.exceptions import NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 import pygame
 import os
@@ -35,7 +35,7 @@ class CafeMonitorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("네이버 카페 알리미")
-        self.root.geometry("400x250")
+        self.root.geometry("400x300") # 창 높이를 300으로 약간 늘림
         self.root.resizable(False, False)
 
         # 상태 변수
@@ -63,13 +63,20 @@ class CafeMonitorApp:
             print(f"파일을 찾을 수 없습니다: {ALARM_FILE_PATH}")
 
     def setup_ui(self):
-        main_frame = tk.Frame(self.root, padx=20, pady=20)
-        main_frame.pack(expand=True, fill="both")
+        # [수정됨] 상태바를 먼저 하단에 배치하여 공간 확보
+        self.status_label = tk.Label(self.root, text="초기화 중...", font=("맑은 고딕", 9), anchor="center", bg="#f0f0f0")
+        self.status_label.pack(side="bottom", fill="x", pady=10)
 
+        # 메인 프레임 배치
+        main_frame = tk.Frame(self.root, padx=20, pady=20)
+        main_frame.pack(expand=True, fill="both", side="top")
+
+        # 1. 상단: 반복 설정 버튼
         self.btn_loop = tk.Button(main_frame, text="알림 무한 반복", font=("맑은 고딕", 12, "bold"),
                                   command=self.toggle_loop_mode, width=20, height=2, borderwidth=2, relief="solid")
-        self.btn_loop.pack(pady=(0, 15))
+        self.btn_loop.pack(pady=(10, 20))
 
+        # 2. 중간: 볼륨 조절
         vol_frame = tk.Frame(main_frame)
         vol_frame.pack(fill="x", pady=5)
 
@@ -78,10 +85,11 @@ class CafeMonitorApp:
         self.vol_scale = ttk.Scale(vol_frame, from_=0, to=100, orient="horizontal", command=self.set_volume)
         self.vol_scale.set(70)
         self.vol_scale.pack(side="left", fill="x", expand=True, padx=10)
-        pygame.mixer.music.set_volume(0.7)
+        pygame.mixer.music.set_volume(0.2)
 
+        # 3. 하단 버튼 그룹
         btn_frame = tk.Frame(main_frame)
-        btn_frame.pack(fill="x", pady=20)
+        btn_frame.pack(fill="x", pady=30)
 
         self.btn_test = tk.Button(btn_frame, text="알람 테스트", font=("맑은 고딕", 11, "bold"),
                                   command=self.test_alarm, width=12, height=2, borderwidth=2, relief="solid")
@@ -90,9 +98,6 @@ class CafeMonitorApp:
         self.btn_stop = tk.Button(btn_frame, text="알람 끄기", font=("맑은 고딕", 11, "bold"), fg="red",
                                   command=self.stop_alarm, width=12, height=2, borderwidth=2, relief="solid")
         self.btn_stop.pack(side="right")
-
-        self.status_label = tk.Label(self.root, text="백그라운드 모니터링 시작 중...", font=("맑은 고딕", 9), anchor="center")
-        self.status_label.pack(side="bottom", fill="x", pady=5)
 
     def toggle_loop_mode(self):
         self.is_loop_mode = not self.is_loop_mode
@@ -124,7 +129,8 @@ class CafeMonitorApp:
                 self.update_status(f"재생 오류: {e}")
 
     def update_status(self, text):
-        self.status_label.config(text=text)
+        # [수정됨] Thread-safe 하게 UI 업데이트 (root.after 사용)
+        self.root.after(0, lambda: self.status_label.config(text=text))
 
     def start_monitoring_thread(self):
         t = threading.Thread(target=self.monitor_logic)
@@ -178,7 +184,6 @@ class CafeMonitorApp:
             driver.switch_to.frame("cafe_main")
         except:
             pass
-        # 스크린샷에 맞춰 selector 수정: div.article-board 안의 모든 tr 검색
         rows = driver.find_elements(By.CSS_SELECTOR, "div.article-board table tbody tr")
         return rows
 
@@ -186,14 +191,12 @@ class CafeMonitorApp:
         rows = self.get_list_items(driver)
         for row in rows:
             try:
-                # [수정됨] 스크린샷의 클래스명 반영: td.type_articleNumber
                 num_element = row.find_element(By.CSS_SELECTOR, "td.type_articleNumber")
                 num_text = num_element.text.strip()
 
                 if num_text.isdigit():
                     return int(num_text)
             except NoSuchElementException:
-                # 공지사항 등 해당 클래스가 없는 줄은 그냥 건너뜀
                 continue
             except Exception:
                 continue
@@ -206,17 +209,14 @@ class CafeMonitorApp:
 
         for row in rows:
             try:
-                # 1. 글 번호 확인 [수정됨]
                 try:
-                    # 스크린샷의 클래스명 반영: td.type_articleNumber
                     num_element = row.find_element(By.CSS_SELECTOR, "td.type_articleNumber")
                 except NoSuchElementException:
-                    # 번호 칸이 없는 줄(공지사항 상단바 등)은 무시
                     continue
 
                 num_text = num_element.text.strip()
 
-                if not num_text.isdigit(): # "공지" 등의 텍스트가 있으면 무시
+                if not num_text.isdigit():
                     continue
 
                 current_id = int(num_text)
@@ -227,13 +227,10 @@ class CafeMonitorApp:
                 if current_id > max_id_in_page:
                     max_id_in_page = current_id
 
-                # 2. 작성자 확인 (옵션)
-                # 작성자 태그도 혹시 다를 수 있으니 안전하게 찾기
                 try:
                     writer_element = row.find_element(By.CSS_SELECTOR, "td.td_name")
                     writer_text = writer_element.text.strip()
                 except NoSuchElementException:
-                    # td_name이 없으면 p-nick 등 다른 구조일 수 있음. 일단 스킵하거나 로그
                     writer_text = ""
 
                 is_target_match = False
@@ -253,7 +250,8 @@ class CafeMonitorApp:
         if max_id_in_page > self.last_article_id:
             self.last_article_id = max_id_in_page
             if not found_new:
-                self.update_status(f"모니터링 중... (최신글 갱신: {self.last_article_id})")
+                # 주기적으로 현재 상태 표시 (선택사항)
+                pass
 
         return found_new
 
