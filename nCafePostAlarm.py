@@ -10,16 +10,25 @@ from selenium.common.exceptions import NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 import pygame
 import os
+import sys
 
 # ==========================================
 # [사용자 설정] 아래 내용을 사용 환경에 맞게 수정하세요
 # ==========================================
 
 # 1. 알람으로 사용할 MP3 파일의 절대 경로
-ALARM_FILE_PATH = r"C:\path\to\your\file.mp3"
+# ALARM_FILE_PATH = r""
+# 현재 실행 파일(exe)이 있는 위치를 찾음
+if getattr(sys, 'frozen', False):
+    application_path = os.path.dirname(sys.executable)
+else:
+    application_path = os.path.dirname(os.path.abspath(__file__))
+
+# 같은 폴더 내의 alarm.mp3 파일 지정
+ALARM_FILE_PATH = os.path.join(application_path, "alarm.mp3")
 
 # 2. 감시할 네이버 카페 '특정 게시판'의 URL
-TARGET_BOARD_URL = "https://cafe.naver.com/ArticleList.nhn?search.clubid=카페ID&search.menuid=게시판ID&search.boardtype=L"
+TARGET_BOARD_URL = "https://cafe.naver.com/f-e/cafes/31352147/menus/13"
 
 # 3. 감시할 대상 닉네임 (옵션)
 # - 특정 닉네임만 감시하려면: "닉네임 입력"
@@ -27,7 +36,7 @@ TARGET_BOARD_URL = "https://cafe.naver.com/ArticleList.nhn?search.clubid=카페I
 TARGET_NICKNAME = ""
 
 # 4. 새로고침 주기 (초 단위)
-CHECK_INTERVAL = 30
+CHECK_INTERVAL = 60
 
 # ==========================================
 
