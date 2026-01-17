@@ -6,6 +6,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import NoSuchElementException # 에러 처리를 위해 추가
 from webdriver_manager.chrome import ChromeDriverManager
 import pygame
 import os
@@ -18,12 +19,11 @@ import os
 ALARM_FILE_PATH = r""
 
 # 2. 감시할 네이버 카페 '특정 게시판'의 URL
-# "https://cafe.naver.com/ArticleList.nhn?search.clubid=카페ID&search.menuid=게시판ID&search.boardtype=L"
 TARGET_BOARD_URL = ""
 
 # 3. 감시할 대상 닉네임 (옵션)
 # - 특정 닉네임만 감시하려면: "닉네임 입력"
-# - 게시판의 모든 새 글을 감시하려면: "" (빈 따옴표로 둠)
+# - 게시판의 모든 새 글을 감시하려면: "" (빈 따옴표)
 TARGET_NICKNAME = ""
 
 # 4. 새로고침 주기 (초 단위)
@@ -40,8 +40,8 @@ class CafeMonitorApp:
 
         # 상태 변수
         self.is_running = True
-        self.is_loop_mode = True  # True: 무한반복, False: 1회재생
-        self.last_article_id = 0  # 가장 최근 확인한 게시글 번호
+        self.is_loop_mode = True
+        self.last_article_id = 0
 
         # Pygame 오디오 초기화
         pygame.mixer.init()
@@ -54,7 +54,6 @@ class CafeMonitorApp:
         self.start_monitoring_thread()
 
     def load_music(self):
-        """음원 파일 로드"""
         if os.path.exists(ALARM_FILE_PATH):
             try:
                 pygame.mixer.music.load(ALARM_FILE_PATH)
@@ -64,41 +63,34 @@ class CafeMonitorApp:
             print(f"파일을 찾을 수 없습니다: {ALARM_FILE_PATH}")
 
     def setup_ui(self):
-        # 전체를 감싸는 메인 프레임
         main_frame = tk.Frame(self.root, padx=20, pady=20)
         main_frame.pack(expand=True, fill="both")
 
-        # 1. 상단: 반복 설정 버튼 (토글)
         self.btn_loop = tk.Button(main_frame, text="알림 무한 반복", font=("맑은 고딕", 12, "bold"),
                                   command=self.toggle_loop_mode, width=20, height=2, borderwidth=2, relief="solid")
         self.btn_loop.pack(pady=(0, 15))
 
-        # 2. 중간: 볼륨 조절
         vol_frame = tk.Frame(main_frame)
         vol_frame.pack(fill="x", pady=5)
 
         tk.Label(vol_frame, text="볼륨 : ", font=("맑은 고딕", 11, "bold")).pack(side="left")
 
         self.vol_scale = ttk.Scale(vol_frame, from_=0, to=100, orient="horizontal", command=self.set_volume)
-        self.vol_scale.set(70) # 기본 볼륨 70
+        self.vol_scale.set(70)
         self.vol_scale.pack(side="left", fill="x", expand=True, padx=10)
         pygame.mixer.music.set_volume(0.7)
 
-        # 3. 하단 버튼 그룹 (테스트, 끄기)
         btn_frame = tk.Frame(main_frame)
         btn_frame.pack(fill="x", pady=20)
 
-        # 알람 테스트 버튼
         self.btn_test = tk.Button(btn_frame, text="알람 테스트", font=("맑은 고딕", 11, "bold"),
                                   command=self.test_alarm, width=12, height=2, borderwidth=2, relief="solid")
         self.btn_test.pack(side="left", padx=(0, 10))
 
-        # 알람 끄기 버튼
         self.btn_stop = tk.Button(btn_frame, text="알람 끄기", font=("맑은 고딕", 11, "bold"), fg="red",
                                   command=self.stop_alarm, width=12, height=2, borderwidth=2, relief="solid")
         self.btn_stop.pack(side="right")
 
-        # 4. 최하단 상태 표시줄
         self.status_label = tk.Label(self.root, text="백그라운드 모니터링 시작 중...", font=("맑은 고딕", 9), anchor="center")
         self.status_label.pack(side="bottom", fill="x", pady=5)
 
@@ -140,15 +132,12 @@ class CafeMonitorApp:
         t.start()
 
     def monitor_logic(self):
-        # === 백그라운드(Headless) 설정 ===
         options = Options()
-        options.add_argument("--headless") # 창 숨기기 활성화
+        options.add_argument("--headless")
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
-        # 봇 탐지 방지를 위한 User-Agent 설정
         options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36")
 
-        # 드라이버 매니저를 통해 자동 설치 및 실행
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
 
@@ -157,26 +146,22 @@ class CafeMonitorApp:
             driver.get(TARGET_BOARD_URL)
             time.sleep(2)
 
-            # 최초 기준점 잡기
             self.last_article_id = self.get_latest_post_id(driver)
 
             target_info = f"'{TARGET_NICKNAME}' 감시" if TARGET_NICKNAME else "전체 감시"
             if self.last_article_id > 0:
                 self.update_status(f"모니터링 시작 ({target_info}) - 최신글: {self.last_article_id}")
             else:
-                self.update_status("게시글을 찾을 수 없습니다. 설정 확인 필요.")
+                self.update_status("게시글을 인식할 수 없습니다. selector 확인 필요.")
 
             while self.is_running:
                 time.sleep(CHECK_INTERVAL)
 
                 try:
                     driver.refresh()
-                    time.sleep(2) # 로딩 대기
+                    time.sleep(2)
 
-                    # 새 글 감지 로직 실행
-                    new_post_found = self.check_new_posts(driver)
-
-                    if new_post_found:
+                    if self.check_new_posts(driver):
                         self.play_alarm()
 
                 except Exception as e:
@@ -193,17 +178,24 @@ class CafeMonitorApp:
             driver.switch_to.frame("cafe_main")
         except:
             pass
-        rows = driver.find_elements(By.CSS_SELECTOR, "div.article-board > table > tbody > tr")
+        # 스크린샷에 맞춰 selector 수정: div.article-board 안의 모든 tr 검색
+        rows = driver.find_elements(By.CSS_SELECTOR, "div.article-board table tbody tr")
         return rows
 
     def get_latest_post_id(self, driver):
         rows = self.get_list_items(driver)
         for row in rows:
             try:
-                num_text = row.find_element(By.CSS_SELECTOR, "td.td_article").text.strip()
+                # [수정됨] 스크린샷의 클래스명 반영: td.type_articleNumber
+                num_element = row.find_element(By.CSS_SELECTOR, "td.type_articleNumber")
+                num_text = num_element.text.strip()
+
                 if num_text.isdigit():
                     return int(num_text)
-            except:
+            except NoSuchElementException:
+                # 공지사항 등 해당 클래스가 없는 줄은 그냥 건너뜀
+                continue
+            except Exception:
                 continue
         return 0
 
@@ -214,31 +206,40 @@ class CafeMonitorApp:
 
         for row in rows:
             try:
-                # 1. 글 번호 확인
-                num_element = row.find_element(By.CSS_SELECTOR, "td.td_article")
+                # 1. 글 번호 확인 [수정됨]
+                try:
+                    # 스크린샷의 클래스명 반영: td.type_articleNumber
+                    num_element = row.find_element(By.CSS_SELECTOR, "td.type_articleNumber")
+                except NoSuchElementException:
+                    # 번호 칸이 없는 줄(공지사항 상단바 등)은 무시
+                    continue
+
                 num_text = num_element.text.strip()
 
-                if not num_text.isdigit(): # 공지사항 건너뛰기
+                if not num_text.isdigit(): # "공지" 등의 텍스트가 있으면 무시
                     continue
 
                 current_id = int(num_text)
 
-                # 이미 확인한 글 번호 이하라면 탐색 중단
                 if current_id <= self.last_article_id:
                     break
 
                 if current_id > max_id_in_page:
                     max_id_in_page = current_id
 
-                # 2. 작성자 확인 (옵션 적용)
-                writer_element = row.find_element(By.CSS_SELECTOR, "td.td_name")
-                writer_text = writer_element.text.strip()
+                # 2. 작성자 확인 (옵션)
+                # 작성자 태그도 혹시 다를 수 있으니 안전하게 찾기
+                try:
+                    writer_element = row.find_element(By.CSS_SELECTOR, "td.td_name")
+                    writer_text = writer_element.text.strip()
+                except NoSuchElementException:
+                    # td_name이 없으면 p-nick 등 다른 구조일 수 있음. 일단 스킵하거나 로그
+                    writer_text = ""
 
-                # 조건: 닉네임 설정이 없거나 OR 닉네임이 일치하거나
                 is_target_match = False
-                if not TARGET_NICKNAME: # 설정값이 비어있으면 무조건 True
+                if not TARGET_NICKNAME:
                     is_target_match = True
-                elif TARGET_NICKNAME in writer_text: # 설정값이 있으면 일치 여부 확인
+                elif TARGET_NICKNAME in writer_text:
                     is_target_match = True
 
                 if is_target_match:
@@ -246,13 +247,12 @@ class CafeMonitorApp:
                     self.update_status(f"새 글 발견! 번호:{current_id}, 작성자:{writer_text}")
 
             except Exception as e:
+                print(f"Row error: {e}")
                 continue
 
-        # 상태 업데이트 (마지막 확인한 글 번호 갱신)
         if max_id_in_page > self.last_article_id:
             self.last_article_id = max_id_in_page
             if not found_new:
-                # 새 글은 올라왔지만, 타겟 닉네임이 아니라서 알람은 안 울린 경우
                 self.update_status(f"모니터링 중... (최신글 갱신: {self.last_article_id})")
 
         return found_new
