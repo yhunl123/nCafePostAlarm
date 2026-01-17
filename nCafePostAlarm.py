@@ -16,10 +16,10 @@ import os
 # ==========================================
 
 # 1. 알람으로 사용할 MP3 파일의 절대 경로
-ALARM_FILE_PATH = r""
+ALARM_FILE_PATH = r"C:\path\to\your\file.mp3"
 
 # 2. 감시할 네이버 카페 '특정 게시판'의 URL
-TARGET_BOARD_URL = ""
+TARGET_BOARD_URL = "https://cafe.naver.com/ArticleList.nhn?search.clubid=카페ID&search.menuid=게시판ID&search.boardtype=L"
 
 # 3. 감시할 대상 닉네임 (옵션)
 # - 특정 닉네임만 감시하려면: "닉네임 입력"
@@ -35,13 +35,14 @@ class CafeMonitorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("네이버 카페 알리미")
-        self.root.geometry("400x300") # 창 높이를 300으로 약간 늘림
+        self.root.geometry("400x300")
         self.root.resizable(False, False)
 
         # 상태 변수
         self.is_running = True
-        self.is_loop_mode = True
+        self.is_loop_mode = True  # True: 무한반복, False: 1회재생
         self.last_article_id = 0
+        self.alarm_active = False # 현재 알람이 '켜진' 상태인지 추적하는 변수
 
         # Pygame 오디오 초기화
         pygame.mixer.init()
@@ -50,7 +51,10 @@ class CafeMonitorApp:
         # UI 구성
         self.setup_ui()
 
-        # 모니터링 자동 시작
+        # 알람 상태 감시 루프 시작 (새로 추가됨)
+        self.check_music_status()
+
+        # 크롤링 모니터링 스레드 시작
         self.start_monitoring_thread()
 
     def load_music(self):
@@ -63,31 +67,31 @@ class CafeMonitorApp:
             print(f"파일을 찾을 수 없습니다: {ALARM_FILE_PATH}")
 
     def setup_ui(self):
-        # [수정됨] 상태바를 먼저 하단에 배치하여 공간 확보
+        # 상태바 배치
         self.status_label = tk.Label(self.root, text="초기화 중...", font=("맑은 고딕", 9), anchor="center", bg="#f0f0f0")
         self.status_label.pack(side="bottom", fill="x", pady=10)
 
-        # 메인 프레임 배치
+        # 메인 프레임
         main_frame = tk.Frame(self.root, padx=20, pady=20)
         main_frame.pack(expand=True, fill="both", side="top")
 
-        # 1. 상단: 반복 설정 버튼
+        # 1. 반복 설정 버튼
         self.btn_loop = tk.Button(main_frame, text="알림 무한 반복", font=("맑은 고딕", 12, "bold"),
                                   command=self.toggle_loop_mode, width=20, height=2, borderwidth=2, relief="solid")
         self.btn_loop.pack(pady=(10, 20))
 
-        # 2. 중간: 볼륨 조절
+        # 2. 볼륨 조절
         vol_frame = tk.Frame(main_frame)
         vol_frame.pack(fill="x", pady=5)
 
         tk.Label(vol_frame, text="볼륨 : ", font=("맑은 고딕", 11, "bold")).pack(side="left")
 
         self.vol_scale = ttk.Scale(vol_frame, from_=0, to=100, orient="horizontal", command=self.set_volume)
-        self.vol_scale.set(70)
+        self.vol_scale.set(10)
         self.vol_scale.pack(side="left", fill="x", expand=True, padx=10)
-        pygame.mixer.music.set_volume(0.2)
+        pygame.mixer.music.set_volume(0.1)
 
-        # 3. 하단 버튼 그룹
+        # 3. 버튼 그룹
         btn_frame = tk.Frame(main_frame)
         btn_frame.pack(fill="x", pady=30)
 
@@ -114,22 +118,47 @@ class CafeMonitorApp:
         self.play_alarm(is_test=True)
 
     def stop_alarm(self):
+        """알람 강제 종료"""
         pygame.mixer.music.stop()
+        self.alarm_active = False # 알람 활성 상태 해제
         self.update_status("알람이 중지되었습니다.")
 
     def play_alarm(self, is_test=False):
+        """알람 재생 시작"""
+        # 이미 재생 중이면(busy) 무시
         if not pygame.mixer.music.get_busy():
             try:
-                loops = -1 if self.is_loop_mode else 0
-                pygame.mixer.music.play(loops=loops)
+                # 무조건 1회만 재생 (반복 여부는 check_music_status에서 결정)
+                pygame.mixer.music.play(loops=0)
+                self.alarm_active = True # 알람 활성 상태로 변경
+
                 if not is_test:
                     target_msg = f"[{TARGET_NICKNAME}]" if TARGET_NICKNAME else "[새 글]"
                     self.update_status(f"!!! {target_msg} 감지됨 - 알람 울림 !!!")
             except Exception as e:
                 self.update_status(f"재생 오류: {e}")
 
+    def check_music_status(self):
+        """
+        0.1초마다 오디오 상태를 확인하여 수동으로 반복 재생을 처리하는 함수
+        """
+        if self.alarm_active:
+            # 알람이 켜져 있어야 하는 상태인데, 소리가 멈췄다면(곡이 끝남)
+            if not pygame.mixer.music.get_busy():
+                if self.is_loop_mode:
+                    # 반복 모드면 다시 재생
+                    try:
+                        pygame.mixer.music.play(loops=0)
+                    except:
+                        self.alarm_active = False
+                else:
+                    # 1회 재생 모드면 상태 종료
+                    self.alarm_active = False
+
+        # 100ms 뒤에 다시 실행 (재귀 호출)
+        self.root.after(100, self.check_music_status)
+
     def update_status(self, text):
-        # [수정됨] Thread-safe 하게 UI 업데이트 (root.after 사용)
         self.root.after(0, lambda: self.status_label.config(text=text))
 
     def start_monitoring_thread(self):
@@ -193,7 +222,6 @@ class CafeMonitorApp:
             try:
                 num_element = row.find_element(By.CSS_SELECTOR, "td.type_articleNumber")
                 num_text = num_element.text.strip()
-
                 if num_text.isdigit():
                     return int(num_text)
             except NoSuchElementException:
@@ -215,7 +243,6 @@ class CafeMonitorApp:
                     continue
 
                 num_text = num_element.text.strip()
-
                 if not num_text.isdigit():
                     continue
 
@@ -244,14 +271,10 @@ class CafeMonitorApp:
                     self.update_status(f"새 글 발견! 번호:{current_id}, 작성자:{writer_text}")
 
             except Exception as e:
-                print(f"Row error: {e}")
                 continue
 
         if max_id_in_page > self.last_article_id:
             self.last_article_id = max_id_in_page
-            if not found_new:
-                # 주기적으로 현재 상태 표시 (선택사항)
-                pass
 
         return found_new
 
