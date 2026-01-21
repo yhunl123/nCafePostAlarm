@@ -61,7 +61,7 @@ class MonitorThread(threading.Thread):
         self.is_running = True
         self.driver = None
         self.last_article_id = 0
-        self.daemon = True # 메인 종료 시 같이 종료되도록 설정하지만, 리소스 정리는 별도로 함
+        self.daemon = True
 
     def run(self):
         options = Options()
@@ -81,7 +81,6 @@ class MonitorThread(threading.Thread):
             self.callback_init(self.item_id, self.last_article_id)
 
             while self.is_running:
-                # interval 동안 잠들기 (1초씩 쪼개서 종료 신호 확인)
                 for _ in range(self.interval):
                     if not self.is_running: break
                     time.sleep(1)
@@ -93,7 +92,6 @@ class MonitorThread(threading.Thread):
                     time.sleep(2)
                     self.check_new_posts()
                 except Exception as e:
-                    # 종료 과정에서 드라이버가 먼저 닫히면 에러가 날 수 있음 -> 무시
                     if self.is_running:
                         self.callback_error(self.item_id, str(e))
 
@@ -101,7 +99,6 @@ class MonitorThread(threading.Thread):
             if self.is_running:
                 self.callback_error(self.item_id, str(e))
         finally:
-            # 스레드 내부에서의 안전 종료 (혹시 모를 상황 대비)
             self.close_driver_safe()
 
     def get_latest_post_id(self):
@@ -159,7 +156,6 @@ class MonitorThread(threading.Thread):
         if max_id_in_page > self.last_article_id:
             self.last_article_id = max_id_in_page
 
-    # [수정 8차] 외부에서 강제로 드라이버를 닫는 메서드
     def stop_and_quit_driver(self):
         self.is_running = False
         self.close_driver_safe()
@@ -167,7 +163,6 @@ class MonitorThread(threading.Thread):
     def close_driver_safe(self):
         if self.driver:
             try:
-                # quit()은 브라우저 창과 해당 ChromeDriver 프로세스를 종료함
                 self.driver.quit()
             except:
                 pass
@@ -313,18 +308,27 @@ class AppLogic:
             print(f"File Not Found: {ALARM_FILE_PATH}")
 
     def setup_ui(self):
+        # 상단 프레임
         top_frame = tk.Frame(self.root, pady=10, padx=10, bg="#f0f0f0")
         top_frame.pack(fill="x")
 
+        # 1. URL 입력 라벨
         tk.Label(top_frame, text="게시판 링크 :", bg="#f0f0f0", font=("맑은 고딕", 10, "bold")).pack(side="left")
 
+        # 2. URL 입력창
         self.entry_url = tk.Entry(top_frame, font=("맑은 고딕", 10))
         self.entry_url.pack(side="left", fill="x", expand=True, padx=10)
         self.entry_url.bind("<Return>", lambda event: self.add_new_item())
 
+        # 3. 입력 버튼
         btn_add = tk.Button(top_frame, text="입력 버튼", command=self.add_new_item, bg="#4a90e2", fg="white", font=("맑은 고딕", 9, "bold"))
         btn_add.pack(side="left")
 
+        # [NEW] 4. 사용법 버튼 (우측 정렬을 위해 side=right)
+        btn_guide = tk.Button(top_frame, text="사용법", command=self.show_guide, bg="#9b59b6", fg="white", font=("맑은 고딕", 9, "bold"))
+        btn_guide.pack(side="right", padx=(10, 0))
+
+        # 메인 리스트 컨테이너
         list_container = tk.Frame(self.root)
         list_container.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -343,6 +347,46 @@ class AppLogic:
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfig(self.canvas.create_window((0,0), window=self.scrollable_frame, anchor='nw'), width=e.width))
+
+    # [NEW] 사용법 안내 팝업
+    def show_guide(self):
+        guide_win = tk.Toplevel(self.root)
+        guide_win.title("프로그램 사용법")
+        guide_win.geometry("550x450")
+
+        guide_text = """
+[ 단계별 사용 가이드 ]
+
+1. 게시판 추가
+   - 네이버 카페의 '특정 게시판' URL을 복사합니다.
+   - 상단 입력창에 붙여넣고 [입력 버튼]을 누르세요.
+   - 올바른 링크라면 리스트에 '항목'이 추가됩니다.
+
+2. 이름 변경
+   - 리스트에 추가된 '항목 1', '항목 2' 등의 이름을 클릭하세요.
+   - 입력창으로 바뀌면 원하는 이름(예: 팬아트 게시판)을 입력하고 엔터를 누르세요.
+
+3. 세부 설정 (우클릭 메뉴)
+   - 항목 위에서 [마우스 오른쪽 버튼]을 클릭하세요.
+   - 감시 주기: 10초 ~ 600초 사이로 설정 가능 (기본 30초)
+   - 알람 반복: '무한 반복' 또는 '1회 재생' 선택 가능
+   - 항목 삭제: 더 이상 감시하지 않는 항목을 삭제
+
+4. 알람 제어
+   - 새 글이 감지되면 항목이 빨간색으로 변하고 알람이 울립니다.
+   - [알림끄기] 버튼을 누르면 소리가 멈추고 다시 감시 상태로 돌아갑니다.
+   - 각 항목의 볼륨 슬라이더로 소리 크기를 개별 조절할 수 있습니다.
+
+5. 주의 사항
+   - 프로그램 실행 파일과 같은 폴더에 'alarm.mp3' 파일이 있어야 합니다.
+   - 항목을 너무 많이(5개 이상) 추가하면 컴퓨터가 느려질 수 있습니다.
+        """
+
+        lbl_guide = tk.Label(guide_win, text=guide_text, justify="left", font=("맑은 고딕", 10), padx=20, pady=20)
+        lbl_guide.pack(fill="both", expand=True)
+
+        btn_close = tk.Button(guide_win, text="닫기", command=guide_win.destroy, width=10)
+        btn_close.pack(pady=10)
 
     def add_new_item(self):
         url = self.entry_url.get().strip()
@@ -381,7 +425,6 @@ class AppLogic:
 
     def remove_item(self, item_id):
         if item_id in self.threads:
-            # 삭제 시에도 안전 종료
             self.threads[item_id].stop_and_quit_driver()
             del self.threads[item_id]
 
@@ -491,21 +534,10 @@ class AppLogic:
 
         self.root.after(500, self.check_alarm_status)
 
-    # [수정 8차] 종료 시 로직 강화
     def on_close(self):
-        # 1. 종료 메시지 (짧게 표시하고 싶다면 아래 주석 해제)
-        # self.root.title("리소스 정리 중...")
-
-        # 2. 모든 활성 스레드에 대해 '드라이버 강제 종료' 실행
-        # 리스트로 변환하여 순회 (도중에 dict가 변경되는 것 방지)
         active_threads = list(self.threads.values())
-
         for t in active_threads:
-            # 이 함수는 해당 스레드가 관리하는 driver.quit()을 직접 호출함
-            # 이 과정은 순차적으로 실행되며, 모든 크롬이 꺼질 때까지 메인 윈도우가 잠시 멈출 수 있음
             t.stop_and_quit_driver()
-
-        # 3. 모든 정리가 끝난 후 윈도우 파괴 및 프로그램 종료
         self.root.destroy()
 
 if __name__ == "__main__":
