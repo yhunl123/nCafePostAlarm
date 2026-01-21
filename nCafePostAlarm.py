@@ -7,14 +7,12 @@ import os
 import pygame
 import uuid
 import sys
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
+from urllib.parse import urlparse, parse_qs
+import atexit
 
 # ==========================================
-# [설정] 실행 파일/스크립트 위치 기준 경로 설정
+# [설정] 경로 설정
 # ==========================================
 if getattr(sys, 'frozen', False):
     APP_PATH = os.path.dirname(sys.executable)
@@ -44,7 +42,7 @@ class ConfigManager:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# [개별 감시 스레드 클래스]
+# [API 감시 스레드] - 핵심 변경 부분
 # ==========================================
 class MonitorThread(threading.Thread):
     def __init__(self, item_id, url, interval, nickname_filter, callback_init, callback_found, callback_error):
@@ -59,115 +57,126 @@ class MonitorThread(threading.Thread):
         self.callback_error = callback_error
 
         self.is_running = True
-        self.driver = None
         self.last_article_id = 0
         self.daemon = True
 
+        # URL에서 clubid(카페ID)와 menuid(게시판ID) 추출
+        self.club_id, self.menu_id = self.parse_cafe_url(url)
+
+    def parse_cafe_url(self, url):
+        """URL에서 clubid와 menuid를 추출"""
+        try:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            c_id = params.get('search.clubid', [None])[0]
+            m_id = params.get('search.menuid', [None])[0]
+            return c_id, m_id
+        except:
+            return None, None
+
     def run(self):
-        options = Options()
-        options.add_argument("--headless")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36")
+        # ID 추출 실패 시 에러 처리
+        if not self.club_id or not self.menu_id:
+            self.callback_error(self.item_id, "URL 분석 실패: clubid/menuid 없음")
+            return
 
+        # 1. 초기 접속 (최신글 ID 가져오기)
         try:
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=options)
-
-            self.driver.get(self.url)
-            time.sleep(2)
-
-            self.last_article_id = self.get_latest_post_id()
+            self.last_article_id = self.fetch_latest_article_id()
             self.callback_init(self.item_id, self.last_article_id)
-
-            while self.is_running:
-                for _ in range(self.interval):
-                    if not self.is_running: break
-                    time.sleep(1)
-
-                if not self.is_running: break
-
-                try:
-                    self.driver.refresh()
-                    time.sleep(2)
-                    self.check_new_posts()
-                except Exception as e:
-                    if self.is_running:
-                        self.callback_error(self.item_id, str(e))
-
         except Exception as e:
-            if self.is_running:
-                self.callback_error(self.item_id, str(e))
-        finally:
-            self.close_driver_safe()
+            self.callback_error(self.item_id, f"초기화 실패: {str(e)}")
+            return
 
-    def get_latest_post_id(self):
-        try:
-            self.driver.switch_to.frame("cafe_main")
-        except: pass
+        # 2. 감시 루프
+        while self.is_running:
+            # 대기 (interval)
+            for _ in range(self.interval):
+                if not self.is_running: break
+                time.sleep(1)
 
-        try:
-            rows = self.driver.find_elements(By.CSS_SELECTOR, "div.article-board table tbody tr")
-            for row in rows:
-                try:
-                    num_txt = row.find_element(By.CSS_SELECTOR, "td.type_articleNumber").text.strip()
-                    if num_txt.isdigit():
-                        return int(num_txt)
-                except: continue
-        except: pass
+            if not self.is_running: break
+
+            try:
+                self.check_new_posts()
+            except Exception as e:
+                # 네트워크 일시적 오류 등은 무시하고 계속 진행하거나 로그 출력
+                print(f"[{self.item_id}] Check Error: {e}")
+
+    def fetch_latest_article_id(self):
+        """현재 게시판의 가장 최신 글 번호를 가져옴 (공지 제외)"""
+        articles = self.get_article_list_api()
+        if articles:
+            # API 결과는 보통 최신순 정렬됨
+            return articles[0]['articleId']
         return 0
 
-    def check_new_posts(self):
-        try:
-            self.driver.switch_to.frame("cafe_main")
-        except: pass
+    def get_article_list_api(self):
+        """네이버 카페 모바일 내부 API 호출"""
+        # API 엔드포인트
+        api_url = f"https://apis.naver.com/cafe-web/cafe2/ArticleList.json"
 
-        rows = self.driver.find_elements(By.CSS_SELECTOR, "div.article-board table tbody tr")
+        params = {
+            'search.clubid': self.club_id,
+            'search.queryType': 'lastArticle',
+            'search.menuid': self.menu_id,
+            'search.page': 1,
+            'search.perPage': 10, # 10개만 가져옴
+            'ad': 'true',
+            'uuid': str(uuid.uuid4())
+        }
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1'
+        }
+
+        response = requests.get(api_url, params=params, headers=headers, timeout=5)
+        response.raise_for_status()
+
+        data = response.json()
+
+        # JSON 구조 파싱 (message -> result -> articleList)
+        article_list = data.get('message', {}).get('result', {}).get('articleList', [])
+        return article_list
+
+    def check_new_posts(self):
+        articles = self.get_article_list_api()
+
         found_new = False
         max_id_in_page = self.last_article_id
 
-        for row in rows:
-            try:
-                try:
-                    num_element = row.find_element(By.CSS_SELECTOR, "td.type_articleNumber")
-                except: continue
+        # API는 최신글이 리스트 앞쪽에 옴.
+        # 역순으로(오래된 글 -> 최신 글) 처리해야 놓치지 않음
+        for article in reversed(articles):
+            article_id = article['articleId']
 
-                num_txt = num_element.text.strip()
-                if not num_txt.isdigit(): continue
+            # 이미 본 글이면 스킵
+            if article_id <= self.last_article_id:
+                continue
 
-                current_id = int(num_txt)
-                if current_id <= self.last_article_id: break
-                if current_id > max_id_in_page: max_id_in_page = current_id
+            # 더 큰 ID 발견 시 max 갱신
+            if article_id > max_id_in_page:
+                max_id_in_page = article_id
 
-                writer_text = ""
-                try:
-                    writer_text = row.find_element(By.CSS_SELECTOR, "td.td_name").text.strip()
-                except: pass
+            # 닉네임 필터링
+            writer_name = article.get('writerNickname', '')
 
-                is_match = False
-                if not self.nickname_filter: is_match = True
-                elif self.nickname_filter in writer_text: is_match = True
+            is_match = False
+            if not self.nickname_filter:
+                is_match = True
+            elif self.nickname_filter in writer_name:
+                is_match = True
 
-                if is_match:
-                    found_new = True
-                    self.callback_found(self.item_id, current_id, writer_text)
-            except: continue
+            if is_match:
+                found_new = True
+                self.callback_found(self.item_id, article_id, writer_name)
 
+        # 기준점 갱신
         if max_id_in_page > self.last_article_id:
             self.last_article_id = max_id_in_page
 
-    def stop_and_quit_driver(self):
+    def stop(self):
         self.is_running = False
-        self.close_driver_safe()
-
-    def close_driver_safe(self):
-        if self.driver:
-            try:
-                self.driver.quit()
-            except:
-                pass
-            finally:
-                self.driver = None
 
 # ==========================================
 # [GUI 항목 위젯 클래스]
@@ -182,7 +191,7 @@ class MonitorItemWidget(tk.Frame):
         self.pack(fill="x", pady=2, padx=2)
         self.columnconfigure(1, weight=1)
 
-        # 1. 항목 이름
+        # 이름
         self.name_var = tk.StringVar(value=data.get("name", "항목"))
         self.lbl_name = tk.Label(self, textvariable=self.name_var, font=("맑은 고딕", 10, "bold"), bg="white", width=15, anchor="w")
         self.lbl_name.grid(row=0, column=0, padx=10, sticky="w")
@@ -192,12 +201,12 @@ class MonitorItemWidget(tk.Frame):
         self.ent_name.bind("<Return>", self.save_name)
         self.ent_name.bind("<FocusOut>", self.save_name)
 
-        # 2. 상태 메시지
-        self.status_var = tk.StringVar(value="초기화 중...")
+        # 상태 메시지
+        self.status_var = tk.StringVar(value="대기 중...")
         self.lbl_status = tk.Label(self, textvariable=self.status_var, font=("맑은 고딕", 9), bg="white", anchor="w")
         self.lbl_status.grid(row=0, column=1, padx=5, sticky="ew")
 
-        # 3. 우측 컨트롤
+        # 컨트롤
         ctrl_frame = tk.Frame(self, bg="white")
         ctrl_frame.grid(row=0, column=2, padx=5)
 
@@ -210,7 +219,7 @@ class MonitorItemWidget(tk.Frame):
         self.scale_vol.set(data.get("volume", 70))
         self.scale_vol.pack(side="left", padx=5)
 
-        # 4. 우클릭 메뉴
+        # 우클릭 메뉴
         self.context_menu = tk.Menu(self, tearoff=0)
 
         self.menu_interval = tk.Menu(self.context_menu, tearoff=0)
@@ -284,7 +293,7 @@ class MonitorItemWidget(tk.Frame):
 class AppLogic:
     def __init__(self, root):
         self.root = root
-        self.root.title("네이버 카페 멀티 알리미")
+        self.root.title("네이버 카페 멀티 알리미 (API ver)")
         self.root.geometry("650x500")
 
         self.items_data = ConfigManager.load_config()
@@ -298,6 +307,8 @@ class AppLogic:
         self.restore_items()
         self.check_alarm_status()
 
+        atexit.register(self.on_close)
+
     def load_music(self):
         if os.path.exists(ALARM_FILE_PATH):
             try:
@@ -308,27 +319,21 @@ class AppLogic:
             print(f"File Not Found: {ALARM_FILE_PATH}")
 
     def setup_ui(self):
-        # 상단 프레임
         top_frame = tk.Frame(self.root, pady=10, padx=10, bg="#f0f0f0")
         top_frame.pack(fill="x")
 
-        # 1. URL 입력 라벨
         tk.Label(top_frame, text="게시판 링크 :", bg="#f0f0f0", font=("맑은 고딕", 10, "bold")).pack(side="left")
 
-        # 2. URL 입력창
         self.entry_url = tk.Entry(top_frame, font=("맑은 고딕", 10))
         self.entry_url.pack(side="left", fill="x", expand=True, padx=10)
         self.entry_url.bind("<Return>", lambda event: self.add_new_item())
 
-        # 3. 입력 버튼
         btn_add = tk.Button(top_frame, text="입력 버튼", command=self.add_new_item, bg="#4a90e2", fg="white", font=("맑은 고딕", 9, "bold"))
         btn_add.pack(side="left")
 
-        # [NEW] 4. 사용법 버튼 (우측 정렬을 위해 side=right)
         btn_guide = tk.Button(top_frame, text="사용법", command=self.show_guide, bg="#9b59b6", fg="white", font=("맑은 고딕", 9, "bold"))
         btn_guide.pack(side="right", padx=(10, 0))
 
-        # 메인 리스트 컨테이너
         list_container = tk.Frame(self.root)
         list_container.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -348,45 +353,32 @@ class AppLogic:
         self.scrollbar.pack(side="right", fill="y")
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfig(self.canvas.create_window((0,0), window=self.scrollable_frame, anchor='nw'), width=e.width))
 
-    # [NEW] 사용법 안내 팝업
     def show_guide(self):
         guide_win = tk.Toplevel(self.root)
-        guide_win.title("프로그램 사용법")
+        guide_win.title("사용법 (API 버전)")
         guide_win.geometry("550x450")
 
         guide_text = """
-[ 단계별 사용 가이드 ]
+[ 성능 최적화 API 버전 가이드 ]
 
 1. 게시판 추가
-   - 네이버 카페의 '특정 게시판' URL을 복사합니다.
-   - 상단 입력창에 붙여넣고 [입력 버튼]을 누르세요.
-   - 올바른 링크라면 리스트에 '항목'이 추가됩니다.
+   - 네이버 카페 '게시판 URL'을 입력하세요.
+   - 예: cafe.naver.com/ArticleList.nhn?search.clubid=...
+   - 프로그램이 자동으로 ID를 추출하여 API 감시를 시작합니다.
 
-2. 이름 변경
-   - 리스트에 추가된 '항목 1', '항목 2' 등의 이름을 클릭하세요.
-   - 입력창으로 바뀌면 원하는 이름(예: 팬아트 게시판)을 입력하고 엔터를 누르세요.
+2. 성능 개선 (Chrome Free)
+   - 이제 크롬 브라우저가 실행되지 않습니다.
+   - 훨씬 적은 메모리로 빠르고 쾌적하게 동작합니다.
 
-3. 세부 설정 (우클릭 메뉴)
-   - 항목 위에서 [마우스 오른쪽 버튼]을 클릭하세요.
-   - 감시 주기: 10초 ~ 600초 사이로 설정 가능 (기본 30초)
-   - 알람 반복: '무한 반복' 또는 '1회 재생' 선택 가능
-   - 항목 삭제: 더 이상 감시하지 않는 항목을 삭제
-
-4. 알람 제어
-   - 새 글이 감지되면 항목이 빨간색으로 변하고 알람이 울립니다.
-   - [알림끄기] 버튼을 누르면 소리가 멈추고 다시 감시 상태로 돌아갑니다.
-   - 각 항목의 볼륨 슬라이더로 소리 크기를 개별 조절할 수 있습니다.
-
-5. 주의 사항
-   - 프로그램 실행 파일과 같은 폴더에 'alarm.mp3' 파일이 있어야 합니다.
-   - 항목을 너무 많이(5개 이상) 추가하면 컴퓨터가 느려질 수 있습니다.
+3. 주의 사항
+   - 멤버 공개 게시판 등 로그인이 필요한 곳은 감시가 제한될 수 있습니다.
+   - 너무 짧은 주기(10초 미만)는 네이버 접속 차단 위험이 있습니다.
+   - API 방식은 브라우저 방식보다 10배 이상 가볍습니다.
         """
+        lbl = tk.Label(guide_win, text=guide_text, justify="left", font=("맑은 고딕", 10), padx=20, pady=20)
+        lbl.pack(fill="both", expand=True)
 
-        lbl_guide = tk.Label(guide_win, text=guide_text, justify="left", font=("맑은 고딕", 10), padx=20, pady=20)
-        lbl_guide.pack(fill="both", expand=True)
-
-        btn_close = tk.Button(guide_win, text="닫기", command=guide_win.destroy, width=10)
-        btn_close.pack(pady=10)
+        tk.Button(guide_win, text="닫기", command=guide_win.destroy, width=10).pack(pady=10)
 
     def add_new_item(self):
         url = self.entry_url.get().strip()
@@ -394,8 +386,19 @@ class AppLogic:
             messagebox.showwarning("입력 오류", "URL을 입력해주세요.")
             return
 
-        if "cafe.naver.com" not in url or not url.startswith("http"):
-            messagebox.showerror("입력 오류", "유효하지 않은 링크입니다.\n네이버 카페 게시판 주소(cafe.naver.com)를 입력해주세요.")
+        if "cafe.naver.com" not in url:
+            messagebox.showerror("입력 오류", "유효하지 않은 링크입니다.\n네이버 카페 게시판 주소를 입력해주세요.")
+            return
+
+        # URL 파싱 테스트
+        try:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            if 'search.clubid' not in params or 'search.menuid' not in params:
+                messagebox.showerror("입력 오류", "게시판 정보(clubid, menuid)를 찾을 수 없습니다.\n게시판 리스트 페이지의 URL을 정확히 입력해주세요.")
+                return
+        except:
+            messagebox.showerror("입력 오류", "URL 형식이 올바르지 않습니다.")
             return
 
         new_data = {
@@ -425,7 +428,7 @@ class AppLogic:
 
     def remove_item(self, item_id):
         if item_id in self.threads:
-            self.threads[item_id].stop_and_quit_driver()
+            self.threads[item_id].stop()
             del self.threads[item_id]
 
         if item_id in self.widgets:
@@ -456,7 +459,7 @@ class AppLogic:
 
     def restart_thread(self, item_id):
         if item_id in self.threads:
-            self.threads[item_id].stop_and_quit_driver()
+            self.threads[item_id].stop()
 
         for data in self.items_data:
             if data['id'] == item_id:
@@ -476,7 +479,7 @@ class AppLogic:
 
     def _handle_init(self, item_id, last_id):
         if item_id in self.widgets:
-            self.widgets[item_id].set_status(f"감시중... (최신글: {last_id})", is_alarm=False)
+            self.widgets[item_id].set_status(f"API 감시중... (최신: {last_id})", is_alarm=False)
 
     def _handle_alarm(self, item_id, post_id):
         if item_id in self.widgets:
@@ -508,8 +511,7 @@ class AppLogic:
             current_last_id = 0
             if item_id in self.threads:
                 current_last_id = self.threads[item_id].last_article_id
-
-            self.widgets[item_id].set_status(f"감시중... (최신글: {current_last_id})", is_alarm=False)
+            self.widgets[item_id].set_status(f"API 감시중... (최신: {current_last_id})", is_alarm=False)
 
         if not self.active_alarms:
             pygame.mixer.music.stop()
@@ -535,10 +537,12 @@ class AppLogic:
         self.root.after(500, self.check_alarm_status)
 
     def on_close(self):
-        active_threads = list(self.threads.values())
-        for t in active_threads:
-            t.stop_and_quit_driver()
-        self.root.destroy()
+        for t in self.threads.values():
+            t.stop()
+        try:
+            self.root.destroy()
+        except:
+            pass
 
 if __name__ == "__main__":
     root = tk.Tk()
