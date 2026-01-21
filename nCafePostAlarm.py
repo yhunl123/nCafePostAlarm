@@ -8,7 +8,7 @@ import pygame
 import uuid
 import sys
 import requests
-import re # 정규표현식 사용을 위해 추가
+import re
 import atexit
 
 # ==========================================
@@ -42,7 +42,7 @@ class ConfigManager:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
 # ==========================================
-# [API 감시 스레드] - 핵심 변경 부분
+# [API 감시 스레드]
 # ==========================================
 class MonitorThread(threading.Thread):
     def __init__(self, item_id, url, interval, nickname_filter, callback_init, callback_found, callback_error):
@@ -60,16 +60,10 @@ class MonitorThread(threading.Thread):
         self.last_article_id = 0
         self.daemon = True
 
-        # URL에서 cafeId와 menuId 추출
         self.cafe_id, self.menu_id = self.parse_new_cafe_url(url)
 
     def parse_new_cafe_url(self, url):
-        """
-        최신 네이버 카페 URL 구조에서 ID 추출
-        Format: https://cafe.naver.com/f-e/cafes/{cafeId}/menus/{menuId}
-        """
         try:
-            # 정규표현식으로 ID 추출
             match = re.search(r'cafes/(\d+)/menus/(\d+)', url)
             if match:
                 return match.group(1), match.group(2)
@@ -79,12 +73,10 @@ class MonitorThread(threading.Thread):
             return None, None
 
     def run(self):
-        # ID 추출 실패 시 에러 처리
         if not self.cafe_id or not self.menu_id:
             self.callback_error(self.item_id, "URL 분석 실패: cafeId/menuId를 찾을 수 없습니다.")
             return
 
-        # 1. 초기 접속 (최신글 ID 가져오기)
         try:
             self.last_article_id = self.fetch_latest_article_id()
             self.callback_init(self.item_id, self.last_article_id)
@@ -92,7 +84,6 @@ class MonitorThread(threading.Thread):
             self.callback_error(self.item_id, f"초기화 실패: {str(e)}")
             return
 
-        # 2. 감시 루프
         while self.is_running:
             for _ in range(self.interval):
                 if not self.is_running: break
@@ -106,18 +97,14 @@ class MonitorThread(threading.Thread):
                 print(f"[{self.item_id}] Check Error: {e}")
 
     def fetch_latest_article_id(self):
-        """현재 게시판의 가장 최신 글 번호를 가져옴"""
         articles = self.get_article_list_api()
         if articles:
-            # 첫 번째 항목의 articleId 반환
             first_item = articles[0]
             if first_item.get('type') == 'ARTICLE':
                 return first_item.get('item', {}).get('articleId', 0)
         return 0
 
     def get_article_list_api(self):
-        """네이버 카페 BoardList API 호출"""
-        # API 엔드포인트 (제공해주신 URL 구조 반영)
         api_url = f"https://apis.naver.com/cafe-web/cafe-boardlist-api/v1/cafes/{self.cafe_id}/menus/{self.menu_id}/articles"
 
         params = {
@@ -136,9 +123,6 @@ class MonitorThread(threading.Thread):
         response.raise_for_status()
 
         data = response.json()
-
-        # JSON 구조 파싱 (첨부파일 image_0f6f6d.png 참고)
-        # result -> articleList -> [ {type: "ARTICLE", item: {...}}, ... ]
         article_list = data.get('result', {}).get('articleList', [])
         return article_list
 
@@ -148,9 +132,7 @@ class MonitorThread(threading.Thread):
         found_new = False
         max_id_in_page = self.last_article_id
 
-        # API 리스트 역순 순회 (오래된 글 -> 최신 글)
         for entry in reversed(articles):
-            # 게시글 타입인지 확인
             if entry.get('type') != 'ARTICLE':
                 continue
 
@@ -158,22 +140,12 @@ class MonitorThread(threading.Thread):
             article_id = item.get('articleId')
 
             if not article_id: continue
+            if article_id <= self.last_article_id: continue
+            if article_id > max_id_in_page: max_id_in_page = article_id
 
-            # 이미 본 글이면 스킵
-            if article_id <= self.last_article_id:
-                continue
-
-            # 더 큰 ID 발견 시 max 갱신
-            if article_id > max_id_in_page:
-                max_id_in_page = article_id
-
-            # 닉네임 필터링
-            # 구조상 item -> writerInfo -> nickname 또는 item -> writerNickname
-            # 스크린샷에는 writerInfo 객체가 보임
             writer_info = item.get('writerInfo', {})
             writer_name = writer_info.get('nickname', '')
 
-            # 만약 writerInfo가 없다면 바로 nickname 필드 확인 (구조 대비)
             if not writer_name:
                 writer_name = item.get('writerNickname', '')
 
@@ -187,7 +159,6 @@ class MonitorThread(threading.Thread):
                 found_new = True
                 self.callback_found(self.item_id, article_id, writer_name)
 
-        # 기준점 갱신
         if max_id_in_page > self.last_article_id:
             self.last_article_id = max_id_in_page
 
@@ -270,8 +241,12 @@ class MonitorItemWidget(tk.Frame):
         self.app_logic.save_data()
 
     def update_volume(self, val):
+        # 1. 데이터 저장
         self.data['volume'] = float(val)
         self.app_logic.save_data()
+
+        # 2. [수정] 실시간 재생 중인 볼륨 업데이트 요청
+        self.app_logic.update_realtime_volume(self.item_id, float(val))
 
     def update_interval(self):
         self.data['interval'] = self.interval_var.get()
@@ -382,13 +357,9 @@ class AppLogic:
    - 예: https://cafe.naver.com/f-e/cafes/12345/menus/12
    - 위와 같은 주소를 복사해서 입력창에 넣으세요.
 
-2. 개선된 점
-   - URL 입력 시 카페 ID와 메뉴 ID를 자동으로 인식합니다.
-   - 더 정확한 API를 사용하여 새 글 감지 속도가 빠릅니다.
-
-3. 주의 사항
-   - 기존의 구형 URL (articleList.nhn 등)은 인식되지 않을 수 있습니다.
-   - 브라우저 주소창에 있는 최신 주소를 복사해주세요.
+2. 알람 볼륨 조절
+   - 알람이 울리는 도중에도 볼륨 슬라이더를 움직이면
+   - 즉시 소리 크기가 변합니다.
         """
         lbl = tk.Label(guide_win, text=guide_text, justify="left", font=("맑은 고딕", 10), padx=20, pady=20)
         lbl.pack(fill="both", expand=True)
@@ -401,7 +372,6 @@ class AppLogic:
             messagebox.showwarning("입력 오류", "URL을 입력해주세요.")
             return
 
-        # URL 유효성 검사 (Regex 사용)
         if not re.search(r'cafes/(\d+)/menus/(\d+)', url):
             messagebox.showerror("입력 오류", "지원하지 않는 URL 형식입니다.\n예시: https://cafe.naver.com/f-e/cafes/123456/menus/12")
             return
@@ -507,6 +477,13 @@ class AppLogic:
 
         if not pygame.mixer.music.get_busy():
             pygame.mixer.music.play()
+
+    # [수정] 실시간 볼륨 업데이트 메서드 추가
+    def update_realtime_volume(self, item_id, vol_val):
+        # 만약 이 항목이 현재 알람이 울리고 있는 상태(active_alarms)에 포함되어 있고
+        # 실제로 오디오가 재생 중이라면, 즉시 볼륨을 반영
+        if item_id in self.active_alarms and pygame.mixer.music.get_busy():
+            pygame.mixer.music.set_volume(vol_val / 100.0)
 
     def stop_alarm(self, item_id):
         if item_id in self.active_alarms:
