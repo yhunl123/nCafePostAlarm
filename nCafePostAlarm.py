@@ -8,7 +8,7 @@ import pygame
 import uuid
 import sys
 import requests
-from urllib.parse import urlparse, parse_qs
+import re # 정규표현식 사용을 위해 추가
 import atexit
 
 # ==========================================
@@ -60,24 +60,28 @@ class MonitorThread(threading.Thread):
         self.last_article_id = 0
         self.daemon = True
 
-        # URL에서 clubid(카페ID)와 menuid(게시판ID) 추출
-        self.club_id, self.menu_id = self.parse_cafe_url(url)
+        # URL에서 cafeId와 menuId 추출
+        self.cafe_id, self.menu_id = self.parse_new_cafe_url(url)
 
-    def parse_cafe_url(self, url):
-        """URL에서 clubid와 menuid를 추출"""
+    def parse_new_cafe_url(self, url):
+        """
+        최신 네이버 카페 URL 구조에서 ID 추출
+        Format: https://cafe.naver.com/f-e/cafes/{cafeId}/menus/{menuId}
+        """
         try:
-            parsed = urlparse(url)
-            params = parse_qs(parsed.query)
-            c_id = params.get('search.clubid', [None])[0]
-            m_id = params.get('search.menuid', [None])[0]
-            return c_id, m_id
+            # 정규표현식으로 ID 추출
+            match = re.search(r'cafes/(\d+)/menus/(\d+)', url)
+            if match:
+                return match.group(1), match.group(2)
+            else:
+                return None, None
         except:
             return None, None
 
     def run(self):
         # ID 추출 실패 시 에러 처리
-        if not self.club_id or not self.menu_id:
-            self.callback_error(self.item_id, "URL 분석 실패: clubid/menuid 없음")
+        if not self.cafe_id or not self.menu_id:
+            self.callback_error(self.item_id, "URL 분석 실패: cafeId/menuId를 찾을 수 없습니다.")
             return
 
         # 1. 초기 접속 (최신글 ID 가져오기)
@@ -90,7 +94,6 @@ class MonitorThread(threading.Thread):
 
         # 2. 감시 루프
         while self.is_running:
-            # 대기 (interval)
             for _ in range(self.interval):
                 if not self.is_running: break
                 time.sleep(1)
@@ -100,34 +103,33 @@ class MonitorThread(threading.Thread):
             try:
                 self.check_new_posts()
             except Exception as e:
-                # 네트워크 일시적 오류 등은 무시하고 계속 진행하거나 로그 출력
                 print(f"[{self.item_id}] Check Error: {e}")
 
     def fetch_latest_article_id(self):
-        """현재 게시판의 가장 최신 글 번호를 가져옴 (공지 제외)"""
+        """현재 게시판의 가장 최신 글 번호를 가져옴"""
         articles = self.get_article_list_api()
         if articles:
-            # API 결과는 보통 최신순 정렬됨
-            return articles[0]['articleId']
+            # 첫 번째 항목의 articleId 반환
+            first_item = articles[0]
+            if first_item.get('type') == 'ARTICLE':
+                return first_item.get('item', {}).get('articleId', 0)
         return 0
 
     def get_article_list_api(self):
-        """네이버 카페 모바일 내부 API 호출"""
-        # API 엔드포인트
-        api_url = f"https://apis.naver.com/cafe-web/cafe2/ArticleList.json"
+        """네이버 카페 BoardList API 호출"""
+        # API 엔드포인트 (제공해주신 URL 구조 반영)
+        api_url = f"https://apis.naver.com/cafe-web/cafe-boardlist-api/v1/cafes/{self.cafe_id}/menus/{self.menu_id}/articles"
 
         params = {
-            'search.clubid': self.club_id,
-            'search.queryType': 'lastArticle',
-            'search.menuid': self.menu_id,
-            'search.page': 1,
-            'search.perPage': 10, # 10개만 가져옴
-            'ad': 'true',
-            'uuid': str(uuid.uuid4())
+            'page': 1,
+            'pageSize': 15,
+            'sortBy': 'TIME',
+            'viewType': 'L'
         }
 
         headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://cafe.naver.com/'
         }
 
         response = requests.get(api_url, params=params, headers=headers, timeout=5)
@@ -135,8 +137,9 @@ class MonitorThread(threading.Thread):
 
         data = response.json()
 
-        # JSON 구조 파싱 (message -> result -> articleList)
-        article_list = data.get('message', {}).get('result', {}).get('articleList', [])
+        # JSON 구조 파싱 (첨부파일 image_0f6f6d.png 참고)
+        # result -> articleList -> [ {type: "ARTICLE", item: {...}}, ... ]
+        article_list = data.get('result', {}).get('articleList', [])
         return article_list
 
     def check_new_posts(self):
@@ -145,10 +148,16 @@ class MonitorThread(threading.Thread):
         found_new = False
         max_id_in_page = self.last_article_id
 
-        # API는 최신글이 리스트 앞쪽에 옴.
-        # 역순으로(오래된 글 -> 최신 글) 처리해야 놓치지 않음
-        for article in reversed(articles):
-            article_id = article['articleId']
+        # API 리스트 역순 순회 (오래된 글 -> 최신 글)
+        for entry in reversed(articles):
+            # 게시글 타입인지 확인
+            if entry.get('type') != 'ARTICLE':
+                continue
+
+            item = entry.get('item', {})
+            article_id = item.get('articleId')
+
+            if not article_id: continue
 
             # 이미 본 글이면 스킵
             if article_id <= self.last_article_id:
@@ -159,7 +168,14 @@ class MonitorThread(threading.Thread):
                 max_id_in_page = article_id
 
             # 닉네임 필터링
-            writer_name = article.get('writerNickname', '')
+            # 구조상 item -> writerInfo -> nickname 또는 item -> writerNickname
+            # 스크린샷에는 writerInfo 객체가 보임
+            writer_info = item.get('writerInfo', {})
+            writer_name = writer_info.get('nickname', '')
+
+            # 만약 writerInfo가 없다면 바로 nickname 필드 확인 (구조 대비)
+            if not writer_name:
+                writer_name = item.get('writerNickname', '')
 
             is_match = False
             if not self.nickname_filter:
@@ -175,7 +191,7 @@ class MonitorThread(threading.Thread):
         if max_id_in_page > self.last_article_id:
             self.last_article_id = max_id_in_page
 
-    def stop(self):
+    def stop_and_quit_driver(self):
         self.is_running = False
 
 # ==========================================
@@ -293,7 +309,7 @@ class MonitorItemWidget(tk.Frame):
 class AppLogic:
     def __init__(self, root):
         self.root = root
-        self.root.title("네이버 카페 멀티 알리미 (API ver)")
+        self.root.title("네이버 카페 멀티 알리미 (API v2)")
         self.root.geometry("650x500")
 
         self.items_data = ConfigManager.load_config()
@@ -355,25 +371,24 @@ class AppLogic:
 
     def show_guide(self):
         guide_win = tk.Toplevel(self.root)
-        guide_win.title("사용법 (API 버전)")
+        guide_win.title("사용법 (API v2)")
         guide_win.geometry("550x450")
 
         guide_text = """
-[ 성능 최적화 API 버전 가이드 ]
+[ API v2 가이드 ]
 
-1. 게시판 추가
-   - 네이버 카페 '게시판 URL'을 입력하세요.
-   - 예: cafe.naver.com/ArticleList.nhn?search.clubid=...
-   - 프로그램이 자동으로 ID를 추출하여 API 감시를 시작합니다.
+1. 게시판 추가 방법
+   - 네이버 카페의 **신규 URL 형식**을 지원합니다.
+   - 예: https://cafe.naver.com/f-e/cafes/12345/menus/12
+   - 위와 같은 주소를 복사해서 입력창에 넣으세요.
 
-2. 성능 개선 (Chrome Free)
-   - 이제 크롬 브라우저가 실행되지 않습니다.
-   - 훨씬 적은 메모리로 빠르고 쾌적하게 동작합니다.
+2. 개선된 점
+   - URL 입력 시 카페 ID와 메뉴 ID를 자동으로 인식합니다.
+   - 더 정확한 API를 사용하여 새 글 감지 속도가 빠릅니다.
 
 3. 주의 사항
-   - 멤버 공개 게시판 등 로그인이 필요한 곳은 감시가 제한될 수 있습니다.
-   - 너무 짧은 주기(10초 미만)는 네이버 접속 차단 위험이 있습니다.
-   - API 방식은 브라우저 방식보다 10배 이상 가볍습니다.
+   - 기존의 구형 URL (articleList.nhn 등)은 인식되지 않을 수 있습니다.
+   - 브라우저 주소창에 있는 최신 주소를 복사해주세요.
         """
         lbl = tk.Label(guide_win, text=guide_text, justify="left", font=("맑은 고딕", 10), padx=20, pady=20)
         lbl.pack(fill="both", expand=True)
@@ -386,19 +401,9 @@ class AppLogic:
             messagebox.showwarning("입력 오류", "URL을 입력해주세요.")
             return
 
-        if "cafe.naver.com" not in url:
-            messagebox.showerror("입력 오류", "유효하지 않은 링크입니다.\n네이버 카페 게시판 주소를 입력해주세요.")
-            return
-
-        # URL 파싱 테스트
-        try:
-            parsed = urlparse(url)
-            params = parse_qs(parsed.query)
-            if 'search.clubid' not in params or 'search.menuid' not in params:
-                messagebox.showerror("입력 오류", "게시판 정보(clubid, menuid)를 찾을 수 없습니다.\n게시판 리스트 페이지의 URL을 정확히 입력해주세요.")
-                return
-        except:
-            messagebox.showerror("입력 오류", "URL 형식이 올바르지 않습니다.")
+        # URL 유효성 검사 (Regex 사용)
+        if not re.search(r'cafes/(\d+)/menus/(\d+)', url):
+            messagebox.showerror("입력 오류", "지원하지 않는 URL 형식입니다.\n예시: https://cafe.naver.com/f-e/cafes/123456/menus/12")
             return
 
         new_data = {
@@ -428,7 +433,7 @@ class AppLogic:
 
     def remove_item(self, item_id):
         if item_id in self.threads:
-            self.threads[item_id].stop()
+            self.threads[item_id].stop_and_quit_driver()
             del self.threads[item_id]
 
         if item_id in self.widgets:
@@ -459,7 +464,7 @@ class AppLogic:
 
     def restart_thread(self, item_id):
         if item_id in self.threads:
-            self.threads[item_id].stop()
+            self.threads[item_id].stop_and_quit_driver()
 
         for data in self.items_data:
             if data['id'] == item_id:
@@ -538,7 +543,7 @@ class AppLogic:
 
     def on_close(self):
         for t in self.threads.values():
-            t.stop()
+            t.stop_and_quit_driver()
         try:
             self.root.destroy()
         except:
