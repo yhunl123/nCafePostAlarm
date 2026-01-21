@@ -25,7 +25,7 @@ ALARM_FILE_PATH = os.path.join(APP_PATH, "alarm.mp3")
 CONFIG_FILE_PATH = os.path.join(APP_PATH, "config.json")
 
 # ==========================================
-# [데이터 관리 클래스] 설정 저장/로드
+# [데이터 관리 클래스]
 # ==========================================
 class ConfigManager:
     @staticmethod
@@ -54,15 +54,14 @@ class MonitorThread(threading.Thread):
         self.interval = interval
         self.nickname_filter = nickname_filter
 
-        # 콜백 함수들
-        self.callback_init = callback_init     # [NEW] 초기화 완료 시 호출
-        self.callback_found = callback_found   # 새 글 발견 시 호출
-        self.callback_error = callback_error   # 에러 발생 시 호출
+        self.callback_init = callback_init
+        self.callback_found = callback_found
+        self.callback_error = callback_error
 
         self.is_running = True
         self.driver = None
         self.last_article_id = 0
-        self.daemon = True
+        self.daemon = True # 메인 종료 시 같이 종료되도록 설정하지만, 리소스 정리는 별도로 함
 
     def run(self):
         options = Options()
@@ -75,18 +74,18 @@ class MonitorThread(threading.Thread):
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=options)
 
-            # 초기 접속
             self.driver.get(self.url)
             time.sleep(2)
 
-            # 최신글 번호 가져오기
             self.last_article_id = self.get_latest_post_id()
-
-            # [NEW] 초기화 완료 알림 (메인 스레드로 현재 최신글 번호 전달)
             self.callback_init(self.item_id, self.last_article_id)
 
             while self.is_running:
-                time.sleep(self.interval)
+                # interval 동안 잠들기 (1초씩 쪼개서 종료 신호 확인)
+                for _ in range(self.interval):
+                    if not self.is_running: break
+                    time.sleep(1)
+
                 if not self.is_running: break
 
                 try:
@@ -94,42 +93,37 @@ class MonitorThread(threading.Thread):
                     time.sleep(2)
                     self.check_new_posts()
                 except Exception as e:
-                    self.callback_error(self.item_id, str(e))
+                    # 종료 과정에서 드라이버가 먼저 닫히면 에러가 날 수 있음 -> 무시
+                    if self.is_running:
+                        self.callback_error(self.item_id, str(e))
 
         except Exception as e:
-            self.callback_error(self.item_id, str(e))
+            if self.is_running:
+                self.callback_error(self.item_id, str(e))
         finally:
-            if self.driver:
-                self.driver.quit()
-
-    def stop(self):
-        self.is_running = False
+            # 스레드 내부에서의 안전 종료 (혹시 모를 상황 대비)
+            self.close_driver_safe()
 
     def get_latest_post_id(self):
         try:
             self.driver.switch_to.frame("cafe_main")
-        except:
-            pass
+        except: pass
 
         try:
-            # DOM 구조 탐색 (공지 제외 로직 포함)
             rows = self.driver.find_elements(By.CSS_SELECTOR, "div.article-board table tbody tr")
             for row in rows:
                 try:
                     num_txt = row.find_element(By.CSS_SELECTOR, "td.type_articleNumber").text.strip()
                     if num_txt.isdigit():
                         return int(num_txt)
-                except:
-                    continue
-        except:
-            pass
+                except: continue
+        except: pass
         return 0
 
     def check_new_posts(self):
         try:
             self.driver.switch_to.frame("cafe_main")
-        except:
-            pass
+        except: pass
 
         rows = self.driver.find_elements(By.CSS_SELECTOR, "div.article-board table tbody tr")
         found_new = False
@@ -148,7 +142,6 @@ class MonitorThread(threading.Thread):
                 if current_id <= self.last_article_id: break
                 if current_id > max_id_in_page: max_id_in_page = current_id
 
-                # 닉네임 필터링
                 writer_text = ""
                 try:
                     writer_text = row.find_element(By.CSS_SELECTOR, "td.td_name").text.strip()
@@ -161,12 +154,25 @@ class MonitorThread(threading.Thread):
                 if is_match:
                     found_new = True
                     self.callback_found(self.item_id, current_id, writer_text)
-
             except: continue
 
         if max_id_in_page > self.last_article_id:
             self.last_article_id = max_id_in_page
-            # 감시 중 상태 업데이트 (알람이 아닌 평시 업데이트가 필요하면 콜백 추가 가능)
+
+    # [수정 8차] 외부에서 강제로 드라이버를 닫는 메서드
+    def stop_and_quit_driver(self):
+        self.is_running = False
+        self.close_driver_safe()
+
+    def close_driver_safe(self):
+        if self.driver:
+            try:
+                # quit()은 브라우저 창과 해당 ChromeDriver 프로세스를 종료함
+                self.driver.quit()
+            except:
+                pass
+            finally:
+                self.driver = None
 
 # ==========================================
 # [GUI 항목 위젯 클래스]
@@ -314,8 +320,6 @@ class AppLogic:
 
         self.entry_url = tk.Entry(top_frame, font=("맑은 고딕", 10))
         self.entry_url.pack(side="left", fill="x", expand=True, padx=10)
-
-        # 엔터키로도 입력 가능하도록 바인딩
         self.entry_url.bind("<Return>", lambda event: self.add_new_item())
 
         btn_add = tk.Button(top_frame, text="입력 버튼", command=self.add_new_item, bg="#4a90e2", fg="white", font=("맑은 고딕", 9, "bold"))
@@ -338,18 +342,14 @@ class AppLogic:
 
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
-
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfig(self.canvas.create_window((0,0), window=self.scrollable_frame, anchor='nw'), width=e.width))
 
     def add_new_item(self):
         url = self.entry_url.get().strip()
-
-        # [NEW] URL 유효성 검사
         if not url:
             messagebox.showwarning("입력 오류", "URL을 입력해주세요.")
             return
 
-        # 네이버 카페 주소인지 간단한 검증
         if "cafe.naver.com" not in url or not url.startswith("http"):
             messagebox.showerror("입력 오류", "유효하지 않은 링크입니다.\n네이버 카페 게시판 주소(cafe.naver.com)를 입력해주세요.")
             return
@@ -381,7 +381,8 @@ class AppLogic:
 
     def remove_item(self, item_id):
         if item_id in self.threads:
-            self.threads[item_id].stop()
+            # 삭제 시에도 안전 종료
+            self.threads[item_id].stop_and_quit_driver()
             del self.threads[item_id]
 
         if item_id in self.widgets:
@@ -397,24 +398,22 @@ class AppLogic:
     def save_data(self):
         ConfigManager.save_config(self.items_data)
 
-    # --- 스레드 관리 ---
     def start_thread(self, data):
         t = MonitorThread(
             data['id'],
             data['url'],
             data['interval'],
             data.get('nickname_filter', ""),
-            self.on_thread_init,   # [NEW] 초기화 콜백 연결
+            self.on_thread_init,
             self.on_post_found,
             self.on_thread_error
         )
         self.threads[data['id']] = t
         t.start()
-        # 시작 시에는 UI에 '초기화 중...' 표시 (MonitorItemWidget 기본값)
 
     def restart_thread(self, item_id):
         if item_id in self.threads:
-            self.threads[item_id].stop()
+            self.threads[item_id].stop_and_quit_driver()
 
         for data in self.items_data:
             if data['id'] == item_id:
@@ -423,9 +422,7 @@ class AppLogic:
                     self.widgets[item_id].set_status("재시작 중...")
                 break
 
-    # --- 콜백 메서드 ---
     def on_thread_init(self, item_id, last_id):
-        # [NEW] 스레드 초기화 완료(첫 접속 성공) 시 호출됨
         self.root.after(0, lambda: self._handle_init(item_id, last_id))
 
     def on_post_found(self, item_id, post_id, writer):
@@ -436,7 +433,6 @@ class AppLogic:
 
     def _handle_init(self, item_id, last_id):
         if item_id in self.widgets:
-            # 초기화 완료 후 감시 상태 표시 (Last ID 표시)
             self.widgets[item_id].set_status(f"감시중... (최신글: {last_id})", is_alarm=False)
 
     def _handle_alarm(self, item_id, post_id):
@@ -451,7 +447,6 @@ class AppLogic:
             short_msg = (msg[:30] + '..') if len(msg) > 30 else msg
             self.widgets[item_id].set_status(f"오류: {short_msg}", is_alarm=False)
 
-    # --- 알람 제어 ---
     def play_alarm(self, trigger_item_id):
         for data in self.items_data:
             if data['id'] == trigger_item_id:
@@ -466,10 +461,7 @@ class AppLogic:
         if item_id in self.active_alarms:
             self.active_alarms.remove(item_id)
 
-        # 알람을 끄면 다시 평시 '감시중' 상태로 UI 복구 (최신글 번호는 현재 알 수 없으므로 '감시중...'만 표기하거나 스레드에서 갱신 필요)
-        # 여기서는 단순히 '감시중...' 으로 되돌립니다.
         if item_id in self.widgets:
-            # 스레드 객체에서 마지막 ID를 가져올 수 있다면 더 좋음
             current_last_id = 0
             if item_id in self.threads:
                 current_last_id = self.threads[item_id].last_article_id
@@ -499,9 +491,21 @@ class AppLogic:
 
         self.root.after(500, self.check_alarm_status)
 
+    # [수정 8차] 종료 시 로직 강화
     def on_close(self):
-        for t in self.threads.values():
-            t.stop()
+        # 1. 종료 메시지 (짧게 표시하고 싶다면 아래 주석 해제)
+        # self.root.title("리소스 정리 중...")
+
+        # 2. 모든 활성 스레드에 대해 '드라이버 강제 종료' 실행
+        # 리스트로 변환하여 순회 (도중에 dict가 변경되는 것 방지)
+        active_threads = list(self.threads.values())
+
+        for t in active_threads:
+            # 이 함수는 해당 스레드가 관리하는 driver.quit()을 직접 호출함
+            # 이 과정은 순차적으로 실행되며, 모든 크롬이 꺼질 때까지 메인 윈도우가 잠시 멈출 수 있음
+            t.stop_and_quit_driver()
+
+        # 3. 모든 정리가 끝난 후 윈도우 파괴 및 프로그램 종료
         self.root.destroy()
 
 if __name__ == "__main__":
