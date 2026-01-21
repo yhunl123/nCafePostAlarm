@@ -94,6 +94,7 @@ class MonitorThread(threading.Thread):
             try:
                 self.check_new_posts()
             except Exception as e:
+                # 네트워크 오류 등은 콘솔에만 출력하고 스레드는 유지
                 print(f"[{self.item_id}] Check Error: {e}")
 
     def fetch_latest_article_id(self):
@@ -241,11 +242,8 @@ class MonitorItemWidget(tk.Frame):
         self.app_logic.save_data()
 
     def update_volume(self, val):
-        # 1. 데이터 저장
         self.data['volume'] = float(val)
         self.app_logic.save_data()
-
-        # 2. [수정] 실시간 재생 중인 볼륨 업데이트 요청
         self.app_logic.update_realtime_volume(self.item_id, float(val))
 
     def update_interval(self):
@@ -319,7 +317,7 @@ class AppLogic:
         self.entry_url.pack(side="left", fill="x", expand=True, padx=10)
         self.entry_url.bind("<Return>", lambda event: self.add_new_item())
 
-        btn_add = tk.Button(top_frame, text="입력 버튼", command=self.add_new_item, bg="#4a90e2", fg="white", font=("맑은 고딕", 9, "bold"))
+        btn_add = tk.Button(top_frame, text="입력", command=self.add_new_item, bg="#4a90e2", fg="white", font=("맑은 고딕", 9, "bold"))
         btn_add.pack(side="left")
 
         btn_guide = tk.Button(top_frame, text="사용법", command=self.show_guide, bg="#9b59b6", fg="white", font=("맑은 고딕", 9, "bold"))
@@ -346,25 +344,72 @@ class AppLogic:
 
     def show_guide(self):
         guide_win = tk.Toplevel(self.root)
-        guide_win.title("사용법 (API v2)")
-        guide_win.geometry("550x450")
+        guide_win.title("프로그램 사용법 (상세)")
+        guide_win.geometry("600x650") # 창 크기 확대
 
-        guide_text = """
-[ API v2 가이드 ]
+        # 스크롤 가능한 텍스트 위젯으로 변경
+        txt_guide = tk.Text(guide_win, font=("맑은 고딕", 10), padx=20, pady=20, wrap="word")
+        scrollbar = ttk.Scrollbar(guide_win, orient="vertical", command=txt_guide.yview)
+        txt_guide.configure(yscrollcommand=scrollbar.set)
 
-1. 게시판 추가 방법
-   - 네이버 카페의 **신규 URL 형식**을 지원합니다.
-   - 예: https://cafe.naver.com/f-e/cafes/12345/menus/12
-   - 위와 같은 주소를 복사해서 입력창에 넣으세요.
+        txt_guide.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
-2. 알람 볼륨 조절
-   - 알람이 울리는 도중에도 볼륨 슬라이더를 움직이면
-   - 즉시 소리 크기가 변합니다.
+        # 상세 사용법 내용
+        guide_content = """
+[ 네이버 카페 멀티 알리미 사용 설명서 ]
+
+■ 1. 기초 설정 (준비하기)
+   ① MP3 파일 준비
+      - 실행 파일이 있는 폴더에 'alarm.mp3' 파일을 넣어주세요.
+      - 이 파일이 알람 소리로 사용됩니다.
+   ② 프로그램 실행
+      - 알리미 프로그램을 실행합니다.
+
+■ 2. 게시판 등록하기
+   ① 링크 복사
+      - 네이버 카페에서 감시하려는 게시판에 접속합니다.
+      - 브라우저 상단의 주소(URL)를 복사합니다.
+      - (예: https://cafe.naver.com/f-e/cafes/12345/menus/12)
+   ② 등록
+      - 프로그램 상단 입력창에 주소를 붙여넣습니다.
+      - [입력] 버튼을 누르거나 엔터키를 칩니다.
+      - 하단 리스트에 항목이 추가되면 성공입니다.
+
+■ 3. 항목 관리 (이름 변경/삭제)
+   ① 이름 변경
+      - 리스트에 추가된 '항목 1' 글자를 클릭합니다.
+      - 원하는 이름(예: 팬아트)을 입력하고 엔터를 누릅니다.
+   ② 항목 삭제
+      - 해당 항목 위에서 [마우스 우클릭]을 합니다.
+      - 메뉴 가장 아래의 [항목 삭제]를 클릭합니다.
+
+■ 4. 상세 설정 (우클릭 메뉴)
+   - 항목 위에서 [마우스 우클릭] 시 설정 메뉴가 뜹니다.
+   
+   ① 감시 주기 설정 (기본 30초)
+      - 너무 빠르면(10초) 네이버에서 차단될 수 있습니다.
+      - 보통 30초를 권장합니다.
+   ② 알람 반복 설정
+      - [무한 반복]: [알림끄기] 버튼을 누를 때까지 계속 울립니다.
+      - [1회 반복]: 알람 소리가 한 번 끝나면 자동으로 멈추고, 
+        알림 상태(빨간색)도 자동으로 해제됩니다.
+
+■ 5. 알람 기능 제어
+   ① 볼륨 조절
+      - 슬라이더를 움직여 각 항목별 알람 소리 크기를 조절합니다.
+      - 알람이 울리는 도중에도 즉시 크기가 반영됩니다.
+   ② 알림 끄기
+      - 알람이 울리면 [알림끄기] 버튼이 활성화됩니다.
+      - 버튼을 누르면 소리가 멈추고 다시 감시 모드로 돌아갑니다.
+
+■ 6. 주의 사항
+   - '멤버 공개' 게시판은 로그인이 필요하여 감시되지 않을 수 있습니다.
+   - 항목을 너무 많이(5개 이상) 추가하면 PC가 느려질 수 있습니다.
         """
-        lbl = tk.Label(guide_win, text=guide_text, justify="left", font=("맑은 고딕", 10), padx=20, pady=20)
-        lbl.pack(fill="both", expand=True)
 
-        tk.Button(guide_win, text="닫기", command=guide_win.destroy, width=10).pack(pady=10)
+        txt_guide.insert("1.0", guide_content)
+        txt_guide.config(state="disabled") # 수정 불가능하게 설정
 
     def add_new_item(self):
         url = self.entry_url.get().strip()
@@ -478,10 +523,7 @@ class AppLogic:
         if not pygame.mixer.music.get_busy():
             pygame.mixer.music.play()
 
-    # [수정] 실시간 볼륨 업데이트 메서드 추가
     def update_realtime_volume(self, item_id, vol_val):
-        # 만약 이 항목이 현재 알람이 울리고 있는 상태(active_alarms)에 포함되어 있고
-        # 실제로 오디오가 재생 중이라면, 즉시 볼륨을 반영
         if item_id in self.active_alarms and pygame.mixer.music.get_busy():
             pygame.mixer.music.set_volume(vol_val / 100.0)
 
@@ -498,23 +540,42 @@ class AppLogic:
         if not self.active_alarms:
             pygame.mixer.music.stop()
 
+    # [수정 15차] 알람 상태 체크 로직 개선
     def check_alarm_status(self):
+        # 음악이 멈췄는데(재생 끝), 활성 알람 리스트에 무언가 남아있다면?
         if not pygame.mixer.music.get_busy() and self.active_alarms:
-            should_loop = False
-            target_vol = 0.5
 
-            for item_id in self.active_alarms:
+            # 1. 종료된 알람들 중 '1회 재생'인 것들을 찾아 UI 리셋
+            # (active_alarms 복사본을 만들어 순회하면서 원본 수정)
+            active_list_copy = list(self.active_alarms)
+            has_looper = False
+
+            for item_id in active_list_copy:
                 item_data = next((item for item in self.items_data if item['id'] == item_id), None)
+
                 if item_data:
                     if item_data['loop']:
-                        should_loop = True
-                        target_vol = item_data['volume'] / 100.0
+                        # 무한반복 항목이면 유지
+                        has_looper = True
+                    else:
+                        # [핵심] 1회 재생 항목이면 음악이 끝났으므로 '알람 끄기' 동작 수행
+                        self.stop_alarm(item_id)
+                else:
+                    # 데이터가 없는 경우(삭제됨 등) 안전하게 제거
+                    self.active_alarms.discard(item_id)
 
-            if should_loop:
+            # 2. 아직도 '무한반복' 알람이 남아있다면 다시 재생
+            if has_looper:
+                # 볼륨 재설정 (남아있는 알람 중 하나 기준)
+                target_vol = 0.5
+                for item_id in self.active_alarms:
+                    d = next((item for item in self.items_data if item['id'] == item_id), None)
+                    if d and d['loop']:
+                        target_vol = d['volume'] / 100.0
+                        break # 하나만 찾으면 됨
+
                 pygame.mixer.music.set_volume(target_vol)
                 pygame.mixer.music.play()
-            else:
-                self.active_alarms.clear()
 
         self.root.after(500, self.check_alarm_status)
 
